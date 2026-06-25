@@ -1,0 +1,82 @@
+name: Build patched WDA (importVideo)
+
+# Bấm chạy thủ công trong tab "Actions" của repo (Run workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      wda_ref:
+        description: "Nhánh/tag của appium/WebDriverAgent (mặc định master)"
+        default: "master"
+        required: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repo patch (chứa patch_wda.py)
+        uses: actions/checkout@v4
+        with:
+          path: patch
+
+      - name: Checkout WebDriverAgent
+        uses: actions/checkout@v4
+        with:
+          repository: appium/WebDriverAgent
+          ref: ${{ github.event.inputs.wda_ref }}
+          path: wda
+
+      - name: Áp dụng bản vá importVideo
+        run: python3 patch/patch_wda.py wda
+
+      - name: Liệt kê Xcode (thông tin)
+        run: xcodebuild -version
+
+      - name: Build for testing (KHÔNG ký)
+        working-directory: wda
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Tìm app vừa build
+        working-directory: wda
+        run: |
+          APP=$(find build/Build/Products -name 'WebDriverAgentRunner-Runner.app' -type d | head -1)
+          if [ -z "$APP" ]; then echo "KHONG TIM THAY app"; exit 1; fi
+          echo "APP=$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: Chèn quyền Photos vào Info.plist (cần cho PHPhotoLibrary)
+        working-directory: wda
+        run: |
+          PL="$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 'Import videos to Photos'" "$PL" \
+            || /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryAddUsageDescription 'Import videos to Photos'" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryUsageDescription string 'Import videos to Photos'" "$PL" \
+            || /usr/libexec/PlistBuddy -c "Set :NSPhotoLibraryUsageDescription 'Import videos to Photos'" "$PL"
+          echo "--- Info.plist sau khi sửa ---"
+          /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PL"
+
+      - name: Đóng gói WDA_unsigned.ipa
+        working-directory: wda
+        run: |
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qr WDA_unsigned.ipa Payload
+          ls -la WDA_unsigned.ipa
+
+      - name: Tải lên artifact (WDA_unsigned.ipa)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WDA_unsigned
+          path: wda/WDA_unsigned.ipa
+          if-no-files-found: error
