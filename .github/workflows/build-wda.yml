@@ -69,12 +69,24 @@ jobs:
         working-directory: wda
         run: |
           set -e
-          # Ký ad-hoc (deep) toàn bộ .app -> mọi Mach-O (frameworks, PlugIns,
-          # .xctest, binary chính) có cdhash. Nhờ vậy SideloadDy nhận ra là code
-          # đã ký và ký LẠI bằng cert thật, không còn 'completely unsigned' ở .xctest.
-          codesign --force --deep --sign - "$APP"
-          echo "--- verify chu ky nested .xctest ---"
-          codesign -dvvv "$APP/PlugIns/WebDriverAgentRunner.xctest/WebDriverAgentRunner" 2>&1 | grep -Ei "Signature|CandidateCDHash|Identifier" | head -6 || true
+          # codesign --deep BO QUA PlugIns/.xctest -> phai ky TUNG phan, trong ra ngoai:
+          # 1) framework ben trong .xctest  2) ban than .xctest  3) framework cap app  4) .app
+          for fw in "$APP"/PlugIns/*.xctest/Frameworks/*.framework; do
+            [ -d "$fw" ] && codesign --force --sign - "$fw"
+          done
+          for xc in "$APP"/PlugIns/*.xctest; do
+            [ -d "$xc" ] && codesign --force --sign - "$xc"
+          done
+          for fw in "$APP"/Frameworks/*.framework; do
+            [ -d "$fw" ] && codesign --force --sign - "$fw"
+          done
+          codesign --force --sign - "$APP"
+          echo "--- verify .xctest (phai thay 'Signature=adhoc', KHONG duoc 'not signed') ---"
+          XB="$APP/PlugIns/WebDriverAgentRunner.xctest/WebDriverAgentRunner"
+          codesign -dvvv "$XB" 2>&1 | grep -Ei "Signature|CDHash|Identifier" | head -8
+          if codesign -dvvv "$XB" 2>&1 | grep -qi "not signed"; then
+            echo "ERROR: .xctest binary VAN chua ky"; exit 1
+          fi
 
       - name: Đóng gói WDA_unsigned.ipa
         working-directory: wda
