@@ -65,6 +65,17 @@ jobs:
           echo "--- Info.plist sau khi sửa ---"
           /usr/libexec/PlistBuddy -c "Print :NSPhotoLibraryAddUsageDescription" "$PL"
 
+      - name: Ad-hoc ký các binary lồng (để SideloadDy ký lại được .xctest)
+        working-directory: wda
+        run: |
+          set -e
+          # Ký ad-hoc (deep) toàn bộ .app -> mọi Mach-O (frameworks, PlugIns,
+          # .xctest, binary chính) có cdhash. Nhờ vậy SideloadDy nhận ra là code
+          # đã ký và ký LẠI bằng cert thật, không còn 'completely unsigned' ở .xctest.
+          codesign --force --deep --sign - "$APP"
+          echo "--- verify chu ky nested .xctest ---"
+          codesign -dvvv "$APP/PlugIns/WebDriverAgentRunner.xctest/WebDriverAgentRunner" 2>&1 | grep -Ei "Signature|CandidateCDHash|Identifier" | head -6 || true
+
       - name: Đóng gói WDA_unsigned.ipa
         working-directory: wda
         run: |
