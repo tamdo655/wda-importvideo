@@ -3,10 +3,11 @@
 """Va WebDriverAgent: them route POST /wda/importVideo de ghi video THANG vao
 Thu vien anh (Photos) qua PHPhotoLibrary.
 
-PHIEN BAN 3 (29/06/2026): tu bam "Allow" bang FBAlert (dung co che cua WDA
-/alert/accept, dinh vi alert he thong chuan hon query SpringBoard truc tiep).
-Chay o luong nen 55s song song voi requestAuthorization -> KHONG can cham phone.
-Ho tro nhan dien nut ca tieng Anh ("Allow") lan tieng Viet ("Cho phep").
+PHIEN BAN 4 (29/06/2026): tu bam "Allow" NGAY TREN LUONG XU LY CUA HANDLER
+(dung ngu canh XCUITest - giong het khi WDA xu ly /alert/accept). Cac ban truoc
+bam o global queue nen XCUITest khong thuc thi tap -> popup dung im. Ban nay
+goi requestAuthorization (hien popup) roi VONG LAP DONG BO ngay tren queue cua
+handler de FBAlert bam Allow, cho toi khi co quyen hoac het 30s. KHONG cham phone.
 """
 import os
 import sys
@@ -31,45 +32,27 @@ ROUTE_ADD = (
 HANDLER = r'''
 #pragma mark - [patch] importVideo
 
-// [patch] Tu dong bam "Allow" tren hop thoai xin quyen Anh, dung FBAlert (cach
-// chuan cua WDA cho /alert/accept) + du phong go nut tren SpringBoard.
-+ (void)fb_autoAllowPhotosAlert:(NSTimeInterval)seconds
+// [patch] Bam mot lan cac nut dong y tren alert hien tai (neu co). Chay TREN
+// queue cua caller (dung ngu canh XCUITest). Tra YES neu vua bam duoc.
++ (BOOL)fb_tapAllowOnce
 {
   NSArray<NSString *> *labels = @[
     @"Allow", @"OK", @"Cho phép", @"Cho phep", @"Allow Access to All Photos",
   ];
-  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
-  while ([deadline timeIntervalSinceNow] > 0) {
-    BOOL tapped = NO;
-    // 1) FBAlert tren active app -> tu tim ca alert he thong (SpringBoard).
-    @try {
-      XCUIApplication *app = XCUIApplication.fb_activeApplication;
-      if (nil != app) {
-        FBAlert *alert = [FBAlert alertWithApplication:app];
-        if (alert.isPresent) {
-          NSError *err = nil;
-          for (NSString *name in labels) {
-            err = nil;
-            if ([alert clickAlertButton:name error:&err]) { tapped = YES; break; }
-          }
-          if (!tapped) {
-            err = nil;
-            if ([alert acceptWithError:&err]) { tapped = YES; }
-          }
-        }
-      }
-    } @catch (__unused NSException *ex) {}
-    if (tapped) { return; }
-    // 2) Du phong: go thang nut tren SpringBoard.
-    @try {
-      XCUIApplication *sb = XCUIApplication.fb_systemApplication;
-      for (NSString *label in labels) {
-        XCUIElement *btn = sb.buttons[label];
-        if (btn.exists) { [btn tap]; return; }
-      }
-    } @catch (__unused NSException *ex) {}
-    [NSThread sleepForTimeInterval:0.4];
-  }
+  @try {
+    XCUIApplication *app = XCUIApplication.fb_activeApplication;
+    if (nil == app) { return NO; }
+    FBAlert *alert = [FBAlert alertWithApplication:app];
+    if (!alert.isPresent) { return NO; }
+    NSError *err = nil;
+    for (NSString *name in labels) {
+      err = nil;
+      if ([alert clickAlertButton:name error:&err]) { return YES; }
+    }
+    err = nil;
+    if ([alert acceptWithError:&err]) { return YES; }
+  } @catch (__unused NSException *ex) {}
+  return NO;
 }
 
 + (id<FBResponsePayload>)handleImportVideo:(FBRouteRequest *)request
@@ -106,43 +89,45 @@ HANDLER = r'''
     creationDate = [NSDate dateWithTimeIntervalSince1970:ts.doubleValue];
   }
 
-  // [patch] Neu quyen Anh CHUA quyet dinh -> luong nen tu bam Allow (55s).
-  PHAuthorizationStatus preStatus;
+  // Trang thai quyen hien tai.
+  PHAuthorizationStatus status;
   if (@available(iOS 14, *)) {
-    preStatus = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+    status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
   } else {
-    preStatus = [PHPhotoLibrary authorizationStatus];
-  }
-  if (preStatus == PHAuthorizationStatusNotDetermined) {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-      [self fb_autoAllowPhotosAlert:55.0];
-    });
+    status = [PHPhotoLibrary authorizationStatus];
   }
 
-  __block PHAuthorizationStatus authStatus = PHAuthorizationStatusNotDetermined;
-  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-  if (@available(iOS 14, *)) {
-    [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly
-                                               handler:^(PHAuthorizationStatus status) {
-      authStatus = status;
+  // [patch] Neu CHUA quyet dinh: hien popup roi TU BAM Allow ngay tren queue nay
+  // (dung ngu canh XCUITest) -> khong can cham phone, khong deadlock.
+  if (status == PHAuthorizationStatusNotDetermined) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block PHAuthorizationStatus answered = PHAuthorizationStatusNotDetermined;
+    void (^handler)(PHAuthorizationStatus) = ^(PHAuthorizationStatus st) {
+      answered = st;
       dispatch_semaphore_signal(sem);
-    }];
-  } else {
-    [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
-      authStatus = status;
-      dispatch_semaphore_signal(sem);
-    }];
+    };
+    if (@available(iOS 14, *)) {
+      [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:handler];
+    } else {
+      [PHPhotoLibrary requestAuthorization:handler];
+    }
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
+    while ([deadline timeIntervalSinceNow] > 0) {
+      [self fb_tapAllowOnce];
+      if (0 == dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) { break; }
+      [NSThread sleepForTimeInterval:0.4];
+    }
+    status = answered;
   }
-  dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)));
 
-  BOOL authorized = (authStatus == PHAuthorizationStatusAuthorized);
+  BOOL authorized = (status == PHAuthorizationStatusAuthorized);
   if (@available(iOS 14, *)) {
-    authorized = authorized || (authStatus == PHAuthorizationStatusLimited);
+    authorized = authorized || (status == PHAuthorizationStatusLimited);
   }
   if (!authorized) {
     [NSFileManager.defaultManager removeItemAtURL:tmpURL error:nil];
     return FBResponseWithObject(@{@"imported": @NO,
-      @"error": [NSString stringWithFormat:@"Photos permission not granted (status=%ld)", (long)authStatus]});
+      @"error": [NSString stringWithFormat:@"Photos permission not granted (status=%ld)", (long)status]});
   }
 
   __block NSError *changeErr = nil;
@@ -187,7 +172,7 @@ def main():
     src = src[:end_idx] + "\n" + HANDLER + src[end_idx:]
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(src)
-    print("[patch] OK -> importVideo + auto-Allow (FBAlert) ->", TARGET)
+    print("[patch] OK -> importVideo + auto-Allow dong bo (FBAlert) ->", TARGET)
 
 
 if __name__ == "__main__":
