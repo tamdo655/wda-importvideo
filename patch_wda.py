@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Vá WebDriverAgent: thêm route POST /wda/importVideo để ghi video THẲNG vào
-Thư viện ảnh (Photos) qua PHPhotoLibrary — đúng cách xiaowei làm.
+"""Va WebDriverAgent: them route POST /wda/importVideo de ghi video THANG vao
+Thu vien anh (Photos) qua PHPhotoLibrary.
 
-Chạy trong GitHub Actions SAU khi checkout appium/WebDriverAgent và TRƯỚC khi
-xcodebuild:   python3 patch_wda.py <đường_dẫn_thư_mục_WDA>
+PHIEN BAN 2 (29/06/2026): tu bam nut "Allow" ngay BEN TRONG WDA.
+  Ly do: ban cu cho luong Python bam Allow qua HTTP /alert/accept, nhung
+  handleImportVideo dang CHAN luong HTTP server cua WDA (semaphore) de cho quyen
+  -> request /alert/accept khong bao gio chay duoc (deadlock) -> van phai bam tay.
+  Ban nay cho WDA tu go vao nut Allow cua hop thoai SpringBoard o 1 luong nen
+  song song voi requestAuthorization, nen KHONG can cham vao dien thoai.
 
-Chỉ sửa 1 file có sẵn (WebDriverAgentLib/Commands/FBCustomCommands.m) nên KHÔNG
-cần đụng tới project.pbxproj. Idempotent: chạy lại nhiều lần không hỏng.
+Chay trong GitHub Actions SAU khi checkout appium/WebDriverAgent va TRUOC khi
+xcodebuild:   python3 patch_wda.py <duong_dan_thu_muc_WDA>
 """
 import os
 import sys
@@ -17,8 +21,6 @@ TARGET = os.path.join("WebDriverAgentLib", "Commands", "FBCustomCommands.m")
 IMPORT_ANCHOR = '#import "FBCustomCommands.h"'
 IMPORT_ADD = '#import "FBCustomCommands.h"\n@import Photos;  // [patch] importVideo -> PHPhotoLibrary'
 
-# Dòng route cuối cùng (OPTIONS) ổn định qua mọi phiên bản WDA -> chèn route mới
-# ngay trước nó.
 ROUTE_ANCHOR = ('[[FBRoute OPTIONS:@"/*"].withoutSession respondWithTarget:self '
                 'action:@selector(handlePingCommand:)],')
 ROUTE_ADD = (
@@ -32,11 +34,37 @@ ROUTE_ADD = (
 HANDLER = r'''
 #pragma mark - [patch] importVideo
 
+// [patch] Tu dong bam nut "Allow" tren hop thoai xin quyen Anh cua SpringBoard.
++ (void)fb_autoAllowPhotosAlert:(NSTimeInterval)seconds
+{
+  NSArray<NSString *> *labels = @[
+    @"Allow",
+    @"OK",
+    @"Cho phep",
+    @"Allow Access to All Photos",
+  ];
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+  while ([deadline timeIntervalSinceNow] > 0) {
+    @try {
+      XCUIApplication *sb = XCUIApplication.fb_systemApplication;
+      for (NSString *label in labels) {
+        XCUIElement *btn = sb.buttons[label];
+        if (btn.exists) {
+          [btn tap];
+          return;
+        }
+      }
+    } @catch (__unused NSException *ex) {
+    }
+    [NSThread sleepForTimeInterval:0.4];
+  }
+}
+
 + (id<FBResponsePayload>)handleImportVideo:(FBRouteRequest *)request
 {
   NSString *b64 = request.arguments[@"data"];
   if (![b64 isKindOfClass:NSString.class] || 0 == b64.length) {
-    return FBResponseWithObject(@{@"imported": @NO, @"error": @"missing 'data' (base64 video)"});
+    return FBResponseWithObject(@{@"imported": @NO, @"error": @"missing data (base64 video)"});
   }
   NSData *videoData = [[NSData alloc] initWithBase64EncodedString:b64
                                                           options:NSDataBase64DecodingIgnoreUnknownCharacters];
@@ -60,14 +88,25 @@ HANDLER = r'''
       @"error": [NSString stringWithFormat:@"write temp failed: %@", writeErr.localizedDescription ?: @"unknown"]});
   }
 
-  // Ngày tạo (unix giây) -> giữ ĐÚNG THỨ TỰ trong app Ảnh (Ảnh xếp theo ngày).
   NSDate *creationDate = nil;
   NSNumber *ts = request.arguments[@"creationDate"];
   if ([ts isKindOfClass:NSNumber.class]) {
     creationDate = [NSDate dateWithTimeIntervalSince1970:ts.doubleValue];
   }
 
-  // Xin quyền add-only (đồng bộ). Lần đầu sẽ hiện hộp thoại -> bấm Cho phép 1 lần.
+  // [patch] Neu quyen Anh CHUA duoc quyet dinh -> khoi dong luong nen tu bam Allow.
+  PHAuthorizationStatus preStatus;
+  if (@available(iOS 14, *)) {
+    preStatus = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+  } else {
+    preStatus = [PHPhotoLibrary authorizationStatus];
+  }
+  if (preStatus == PHAuthorizationStatusNotDetermined) {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+      [self fb_autoAllowPhotosAlert:25.0];
+    });
+  }
+
   __block PHAuthorizationStatus authStatus = PHAuthorizationStatusNotDetermined;
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   if (@available(iOS 14, *)) {
@@ -118,35 +157,30 @@ def main():
     root = sys.argv[1] if len(sys.argv) > 1 else "."
     path = os.path.join(root, TARGET)
     if not os.path.isfile(path):
-        print("[patch] LỖI: không thấy", path)
+        print("[patch] LOI: khong thay", path)
         sys.exit(1)
-
     with open(path, "r", encoding="utf-8") as fp:
         src = fp.read()
-
     if "handleImportVideo" in src:
-        print("[patch] đã vá rồi -> bỏ qua")
+        print("[patch] da va roi -> bo qua")
         return
-
     if IMPORT_ANCHOR not in src:
-        print("[patch] LỖI: không thấy anchor import")
+        print("[patch] LOI: khong thay anchor import")
         sys.exit(2)
     if ROUTE_ANCHOR not in src:
-        print("[patch] LỖI: không thấy anchor route OPTIONS")
+        print("[patch] LOI: khong thay anchor route OPTIONS")
         sys.exit(3)
     end_idx = src.rfind("\n@end")
     if end_idx < 0:
-        print("[patch] LỖI: không thấy @end")
+        print("[patch] LOI: khong thay @end")
         sys.exit(4)
-
     src = src.replace(IMPORT_ANCHOR, IMPORT_ADD, 1)
     src = src.replace(ROUTE_ANCHOR, ROUTE_ADD, 1)
     end_idx = src.rfind("\n@end")
     src = src[:end_idx] + "\n" + HANDLER + src[end_idx:]
-
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(src)
-    print("[patch] OK -> đã thêm /wda/importVideo vào", TARGET)
+    print("[patch] OK -> da them /wda/importVideo (tu bam Allow) vao", TARGET)
 
 
 if __name__ == "__main__":
