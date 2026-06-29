@@ -8,7 +8,8 @@ PHIEN BAN 2 (29/06/2026): tu bam nut "Allow" ngay BEN TRONG WDA.
   handleImportVideo dang CHAN luong HTTP server cua WDA (semaphore) de cho quyen
   -> request /alert/accept khong bao gio chay duoc (deadlock) -> van phai bam tay.
   Ban nay cho WDA tu go vao nut Allow cua hop thoai SpringBoard o 1 luong nen
-  song song voi requestAuthorization, nen KHONG can cham vao dien thoai.
+  song song voi requestAuthorization, nen KHONG can cham vao dien thoai. Ho tro
+  ca nhan tieng Anh ("Allow") lan tieng Viet ("Cho phep").
 
 Chay trong GitHub Actions SAU khi checkout appium/WebDriverAgent va TRUOC khi
 xcodebuild:   python3 patch_wda.py <duong_dan_thu_muc_WDA>
@@ -35,13 +36,17 @@ HANDLER = r'''
 #pragma mark - [patch] importVideo
 
 // [patch] Tu dong bam nut "Allow" tren hop thoai xin quyen Anh cua SpringBoard.
+// Ho tro nhan dien nut theo ca tieng Anh va tieng Viet.
 + (void)fb_autoAllowPhotosAlert:(NSTimeInterval)seconds
 {
   NSArray<NSString *> *labels = @[
     @"Allow",
     @"OK",
+    @"Cho phép",
     @"Cho phep",
     @"Allow Access to All Photos",
+    @"Cho phép truy cập tất cả ảnh",
+    @"Cho phép Truy cập vào Tất cả Ảnh",
   ];
   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
   while ([deadline timeIntervalSinceNow] > 0) {
@@ -180,7 +185,7 @@ def main():
     src = src[:end_idx] + "\n" + HANDLER + src[end_idx:]
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(src)
-    print("[patch] OK -> da them /wda/importVideo (tu bam Allow) vao", TARGET)
+    print("[patch] OK -> da them /wda/importVideo (tu bam Allow EN+VI) vao", TARGET)
 
 
 if __name__ == "__main__":
