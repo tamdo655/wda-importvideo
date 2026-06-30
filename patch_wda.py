@@ -39,21 +39,38 @@ HANDLER = r'''
 + (id<FBResponsePayload>)handleVpnStatus:(FBRouteRequest *)request
 {
   BOOL vpnOn = NO;
+  NSMutableArray *seen = [NSMutableArray array];
   @try {
-    XCUIApplication *sb = XCUIApplication.fb_systemApplication;
-    NSPredicate *pred = [NSPredicate predicateWithFormat:
-      @"label CONTAINS[c] 'VPN' OR identifier CONTAINS[c] 'VPN' OR value CONTAINS[c] 'VPN'"];
-    XCUIElementQuery *bars = sb.statusBars;
-    NSUInteger n = bars.count;
-    for (NSUInteger i = 0; i < n; i++) {
-      XCUIElement *bar = [bars elementBoundByIndex:i];
-      XCUIElement *hit = [[bar descendantsMatchingType:XCUIElementTypeAny]
-                          matchingPredicate:pred].firstMatch;
-      if (hit.exists) { vpnOn = YES; break; }
+    NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
+    XCUIApplication *act = XCUIApplication.fb_activeApplication;
+    if (nil != act) { [apps addObject:act]; }
+    XCUIApplication *sys = XCUIApplication.fb_systemApplication;
+    if (nil != sys && sys != act) { [apps addObject:sys]; }
+    for (XCUIApplication *app in apps) {
+      XCUIElementQuery *bars = app.statusBars;
+      NSUInteger nb = bars.count;
+      for (NSUInteger i = 0; i < nb; i++) {
+        XCUIElement *bar = [bars elementBoundByIndex:i];
+        NSArray<XCUIElement *> *kids =
+          [[bar descendantsMatchingType:XCUIElementTypeAny] allElementsBoundByIndex];
+        for (XCUIElement *k in kids) {
+          NSString *lbl = k.label ?: @"";
+          NSString *idf = k.identifier ?: @"";
+          id vv = k.value;
+          NSString *val = [vv isKindOfClass:NSString.class] ? (NSString *)vv : @"";
+          if (seen.count < 40) {
+            [seen addObject:[NSString stringWithFormat:@"%@|%@|%@", lbl, idf, val]];
+          }
+          NSString *all = [NSString stringWithFormat:@"%@ %@ %@", lbl, idf, val];
+          if ([all rangeOfString:@"VPN" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            vpnOn = YES;
+          }
+        }
+      }
     }
   } @catch (__unused NSException *ex) {
   }
-  return FBResponseWithObject(@{@"vpn": vpnOn ? @YES : @NO});
+  return FBResponseWithObject(@{@"vpn": vpnOn ? @YES : @NO, @"seen": seen});
 }
 
 #pragma mark - [patch] importVideo
