@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Va WebDriverAgent: them route POST /wda/importVideo de ghi video THANG vao
-Thu vien anh (Photos) qua PHPhotoLibrary.
+"""Va WebDriverAgent:
+- POST /wda/importVideo  : ghi video THANG vao Thu vien anh (PHPhotoLibrary),
+  tu bam "Allow" ngay tren luong handler (FBAlert) -> khong cham phone.
+- GET  /wda/vpnStatus    : doc thanh trang thai, tra {"vpn": true/false} neu co
+  bieu tuong VPN -> de tool theo doi rot VPN.
 
-PHIEN BAN 4 (29/06/2026): tu bam "Allow" NGAY TREN LUONG XU LY CUA HANDLER
-(dung ngu canh XCUITest - giong het khi WDA xu ly /alert/accept). Cac ban truoc
-bam o global queue nen XCUITest khong thuc thi tap -> popup dung im. Ban nay
-goi requestAuthorization (hien popup) roi VONG LAP DONG BO ngay tren queue cua
-handler de FBAlert bam Allow, cho toi khi co quyen hoac het 30s. KHONG cham phone.
+PHIEN BAN 5 (29/06/2026).
 """
 import os
 import sys
@@ -26,10 +25,37 @@ ROUTE_ADD = (
     'respondWithTarget:self action:@selector(handleImportVideo:)],\n'
     '    [[FBRoute POST:@"/wda/importVideo"] '
     'respondWithTarget:self action:@selector(handleImportVideo:)],\n'
+    '    [[FBRoute GET:@"/wda/vpnStatus"].withoutSession '
+    'respondWithTarget:self action:@selector(handleVpnStatus:)],\n'
+    '    [[FBRoute GET:@"/wda/vpnStatus"] '
+    'respondWithTarget:self action:@selector(handleVpnStatus:)],\n'
     '    ' + ROUTE_ANCHOR
 )
 
 HANDLER = r'''
+#pragma mark - [patch] vpnStatus
+
+// [patch] Tra {"vpn": true} neu thanh trang thai co bieu tuong/chu "VPN".
++ (id<FBResponsePayload>)handleVpnStatus:(FBRouteRequest *)request
+{
+  BOOL vpnOn = NO;
+  @try {
+    XCUIApplication *sb = XCUIApplication.fb_systemApplication;
+    NSPredicate *pred = [NSPredicate predicateWithFormat:
+      @"label CONTAINS[c] 'VPN' OR identifier CONTAINS[c] 'VPN' OR value CONTAINS[c] 'VPN'"];
+    XCUIElementQuery *bars = sb.statusBars;
+    NSUInteger n = bars.count;
+    for (NSUInteger i = 0; i < n; i++) {
+      XCUIElement *bar = [bars elementBoundByIndex:i];
+      XCUIElement *hit = [[bar descendantsMatchingType:XCUIElementTypeAny]
+                          matchingPredicate:pred].firstMatch;
+      if (hit.exists) { vpnOn = YES; break; }
+    }
+  } @catch (__unused NSException *ex) {
+  }
+  return FBResponseWithObject(@{@"vpn": vpnOn ? @YES : @NO});
+}
+
 #pragma mark - [patch] importVideo
 
 // [patch] Bam mot lan cac nut dong y tren alert hien tai (neu co). Chay TREN
@@ -89,7 +115,6 @@ HANDLER = r'''
     creationDate = [NSDate dateWithTimeIntervalSince1970:ts.doubleValue];
   }
 
-  // Trang thai quyen hien tai.
   PHAuthorizationStatus status;
   if (@available(iOS 14, *)) {
     status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
@@ -97,8 +122,6 @@ HANDLER = r'''
     status = [PHPhotoLibrary authorizationStatus];
   }
 
-  // [patch] Neu CHUA quyet dinh: hien popup roi TU BAM Allow ngay tren queue nay
-  // (dung ngu canh XCUITest) -> khong can cham phone, khong deadlock.
   if (status == PHAuthorizationStatusNotDetermined) {
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __block PHAuthorizationStatus answered = PHAuthorizationStatusNotDetermined;
@@ -172,7 +195,7 @@ def main():
     src = src[:end_idx] + "\n" + HANDLER + src[end_idx:]
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(src)
-    print("[patch] OK -> importVideo + auto-Allow dong bo (FBAlert) ->", TARGET)
+    print("[patch] OK -> importVideo + vpnStatus ->", TARGET)
 
 
 if __name__ == "__main__":
