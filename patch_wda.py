@@ -79,27 +79,46 @@ HANDLER = r'''
 
 #pragma mark - [patch] importVideo
 
-// [patch] Bam mot lan cac nut dong y tren alert hien tai (neu co). Chay TREN
-// queue cua caller (dung ngu canh XCUITest). Tra YES neu vua bam duoc.
-+ (BOOL)fb_tapAllowOnce
+// [patch] Bam nut co MOT trong cac nhan `labels` tren alert/hop thoai hien tai.
+// QUAN TRONG: cac hop thoai xin-quyen/xac-nhan cua Photos (Add to Photos,
+// "delete this video?") do SPRINGBOARD (app he thong) trinh bay, KHONG thuoc
+// app dang mo -> phai do tren CA fb_systemApplication LAN fb_activeApplication,
+// tren ca alerts[] lan buttons[] (co ban iOS dat nut trong springboard.buttons).
+// Tra YES neu vua bam duoc mot nut.
++ (BOOL)fb_tapButtonLabels:(NSArray<NSString *> *)labels
 {
-  NSArray<NSString *> *labels = @[
-    @"Allow", @"OK", @"Cho phép", @"Cho phep", @"Allow Access to All Photos",
-  ];
   @try {
-    XCUIApplication *app = XCUIApplication.fb_activeApplication;
-    if (nil == app) { return NO; }
-    FBAlert *alert = [FBAlert alertWithApplication:app];
-    if (!alert.isPresent) { return NO; }
-    NSError *err = nil;
-    for (NSString *name in labels) {
-      err = nil;
-      if ([alert clickAlertButton:name error:&err]) { return YES; }
+    NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
+    XCUIApplication *sys = XCUIApplication.fb_systemApplication;   // SpringBoard
+    if (nil != sys) { [apps addObject:sys]; }
+    XCUIApplication *act = XCUIApplication.fb_activeApplication;
+    if (nil != act && act != sys) { [apps addObject:act]; }
+    for (XCUIApplication *app in apps) {
+      // 1) Nut nam trong alert
+      XCUIElement *alert = [app.alerts elementBoundByIndex:0];
+      if (alert.exists) {
+        for (NSString *name in labels) {
+          XCUIElement *b = alert.buttons[name];
+          if (b.exists && b.isHittable) { [b tap]; return YES; }
+        }
+      }
+      // 2) Nut thuong (mot so alert he thong khong nam trong alerts[])
+      for (NSString *name in labels) {
+        XCUIElement *b = app.buttons[name];
+        if (b.exists && b.isHittable) { [b tap]; return YES; }
+      }
     }
-    err = nil;
-    if ([alert acceptWithError:&err]) { return YES; }
   } @catch (__unused NSException *ex) {}
   return NO;
+}
+
+// [patch] Bam mot lan nut dong y (Allow) tren hop thoai xin quyen Photos.
++ (BOOL)fb_tapAllowOnce
+{
+  return [self fb_tapButtonLabels:@[
+    @"Allow", @"Allow Access to All Photos", @"Allow Full Access",
+    @"OK", @"Cho phép", @"Cho phep",
+  ]];
 }
 
 + (id<FBResponsePayload>)handleImportVideo:(FBRouteRequest *)request
@@ -198,32 +217,28 @@ HANDLER = r'''
 // co). Dung ngu canh XCUITest cua caller. Tra YES neu vua bam duoc.
 + (BOOL)fb_tapDeleteOnce
 {
-  NSArray<NSString *> *labels = @[
+  // Uu tien nut xac nhan XOA; kem theo nhan cap quyen (lan dau xoa iOS xin
+  // quyen Full Access). Do tren CA SpringBoard lan app hien tai.
+  if ([self fb_tapButtonLabels:@[
     @"Delete", @"Delete Video", @"Delete Videos", @"Delete Items", @"Delete Item",
     @"Xóa", @"Xoá", @"Xóa video", @"Xóa Video", @"Xóa mục", @"Remove",
     @"Allow Full Access", @"Allow Access to All Photos", @"Allow", @"OK",
-  ];
+  ]]) {
+    return YES;
+  }
+  // Du phong: action-sheet "Delete X Videos" (so luong doi) -> khop theo chuoi.
   @try {
-    XCUIApplication *app = XCUIApplication.fb_activeApplication;
-    if (nil == app) { return NO; }
-    FBAlert *alert = [FBAlert alertWithApplication:app];
-    if (alert.isPresent) {
-      NSError *err = nil;
-      for (NSString *name in labels) {
-        err = nil;
-        if ([alert clickAlertButton:name error:&err]) { return YES; }
-      }
+    NSArray<XCUIApplication *> *apps = @[
+      XCUIApplication.fb_systemApplication ?: XCUIApplication.fb_activeApplication,
+      XCUIApplication.fb_activeApplication ?: XCUIApplication.fb_systemApplication,
+    ];
+    NSPredicate *p = [NSPredicate predicateWithFormat:
+      @"label CONTAINS[c] 'Delete' OR label CONTAINS[c] 'Xóa'"];
+    for (XCUIApplication *app in apps) {
+      if (nil == app) { continue; }
+      XCUIElement *b = [[app.buttons matchingPredicate:p] elementBoundByIndex:0];
+      if (b.exists && b.isHittable) { [b tap]; return YES; }
     }
-    // Action sheet "Delete X Videos" khong phai alert -> bam nut theo nhan.
-    for (NSString *name in labels) {
-      XCUIElement *btn = app.buttons[name];
-      if (btn.exists && btn.isHittable) { [btn tap]; return YES; }
-    }
-    XCUIElement *sheetBtn =
-      [[app.sheets.buttons matchingPredicate:
-        [NSPredicate predicateWithFormat:@"label CONTAINS[c] 'Delete' OR label CONTAINS[c] 'Xóa'"]]
-       elementBoundByIndex:0];
-    if (sheetBtn.exists && sheetBtn.isHittable) { [sheetBtn tap]; return YES; }
   } @catch (__unused NSException *ex) {}
   return NO;
 }
@@ -335,7 +350,7 @@ def main():
     src = src[:end_idx] + "\n" + HANDLER + src[end_idx:]
     with open(path, "w", encoding="utf-8") as fp:
         fp.write(src)
-    print("[patch] OK -> importVideo + vpnStatus ->", TARGET)
+    print("[patch] OK -> importVideo + deleteRecentVideos + vpnStatus ->", TARGET)
 
 
 if __name__ == "__main__":
