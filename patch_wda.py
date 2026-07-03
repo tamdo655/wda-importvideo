@@ -85,36 +85,92 @@ HANDLER = r'''
 // app dang mo -> phai do tren CA fb_systemApplication LAN fb_activeApplication,
 // tren ca alerts[] lan buttons[] (co ban iOS dat nut trong springboard.buttons).
 // Tra YES neu vua bam duoc mot nut.
-+ (BOOL)fb_tapButtonLabels:(NSArray<NSString *> *)labels
+// [patch] Danh sach app co the chua hop thoai: SpringBoard (chu cac alert he
+// thong), CHINH app WDA Runner (nguoi goi PhotoKit), va app dang mo.
++ (NSArray<XCUIApplication *> *)fb_dialogApps
 {
+  NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
   @try {
-    // Cac hop thoai co the do: SpringBoard, CHINH app WDA Runner (nguoi goi
-    // PhotoKit -> alert xac nhan xoa do no trinh bay), hoac app dang mo.
-    NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
-    XCUIApplication *sys = XCUIApplication.fb_systemApplication;   // SpringBoard
+    XCUIApplication *sys = XCUIApplication.fb_systemApplication;
     if (nil != sys) { [apps addObject:sys]; }
-    XCUIApplication *selfApp = [[XCUIApplication alloc] init];     // WDA Runner
+    XCUIApplication *selfApp = [[XCUIApplication alloc] init];
     if (nil != selfApp) { [apps addObject:selfApp]; }
     XCUIApplication *act = XCUIApplication.fb_activeApplication;
     if (nil != act && ![apps containsObject:act]) { [apps addObject:act]; }
+  } @catch (__unused NSException *ex) {}
+  return apps;
+}
 
-    // Khop nut theo NHAN (label) hoac tieu de (title) - bat ke identifier.
+// [patch] Bam 1 element: thu tap thuong; neu loi thi tap theo TOA DO tam nut.
++ (BOOL)fb_tapElement:(XCUIElement *)el
+{
+  if (nil == el || !el.exists) { return NO; }
+  @try { [el tap]; return YES; } @catch (__unused NSException *ex) {}
+  @try {
+    XCUICoordinate *c = [el coordinateWithNormalizedOffset:CGVectorMake(0.5, 0.5)];
+    [c tap];
+    return YES;
+  } @catch (__unused NSException *ex) {}
+  return NO;
+}
+
++ (BOOL)fb_tapButtonLabels:(NSArray<NSString *> *)labels
+{
+  @try {
+    NSArray<XCUIApplication *> *apps = [self fb_dialogApps];
+
+    // 1) FBAlert (duong WDA CHINH THUC, co xu ly alert SpringBoard) trên tung app.
+    for (XCUIApplication *app in apps) {
+      @try {
+        FBAlert *alert = [FBAlert alertWithApplication:app];
+        if (alert.isPresent) {
+          for (NSString *name in labels) {
+            NSError *e = nil;
+            if ([alert clickAlertButton:name error:&e]) { return YES; }
+          }
+        }
+      } @catch (__unused NSException *ex) {}
+    }
+
+    // 2) Truy van truc tiep: alerts -> sheets -> buttons, khop nhan, tap/toa do.
     NSPredicate *pred = [NSPredicate predicateWithFormat:
       @"label IN %@ OR title IN %@", labels, labels];
-
     for (XCUIApplication *app in apps) {
-      // a) Nut trong ALERT (hop thoai 2 nut: Add to Photos / delete this video)
-      XCUIElement *ab = [[app.alerts.buttons matchingPredicate:pred] elementBoundByIndex:0];
-      if (ab.exists) { [ab tap]; return YES; }
-      // b) Nut trong ACTION SHEET (Allow Full Access / Keep Add Only ...)
-      XCUIElement *sb = [[app.sheets.buttons matchingPredicate:pred] elementBoundByIndex:0];
-      if (sb.exists) { [sb tap]; return YES; }
-      // c) Bat ky nut nao khop nhan (mot so alert he thong nam ngoai alerts[])
-      XCUIElement *any = [[app.buttons matchingPredicate:pred] elementBoundByIndex:0];
-      if (any.exists) { [any tap]; return YES; }
+      NSArray<XCUIElementQuery *> *qs = @[app.alerts.buttons, app.sheets.buttons, app.buttons];
+      for (XCUIElementQuery *q in qs) {
+        XCUIElement *el = [[q matchingPredicate:pred] elementBoundByIndex:0];
+        if (el.exists && [self fb_tapElement:el]) { return YES; }
+      }
     }
   } @catch (__unused NSException *ex) {}
   return NO;
+}
+
+// [patch] CHAN DOAN: liet ke nhan cac nut dang hien thi (tag: sb/self/act) de
+// biet chinh xac WDA co "nhin thay" hop thoai khong.
++ (NSArray<NSString *> *)fb_dumpButtons
+{
+  NSMutableArray<NSString *> *out = [NSMutableArray array];
+  @try {
+    NSArray<XCUIApplication *> *apps = [self fb_dialogApps];
+    NSArray<NSString *> *tags = @[@"sb", @"self", @"act"];
+    NSUInteger idx = 0;
+    for (XCUIApplication *app in apps) {
+      NSString *tag = idx < tags.count ? tags[idx] : @"?"; idx++;
+      @try {
+        NSArray<XCUIElement *> *btns = app.buttons.allElementsBoundByIndex;
+        for (XCUIElement *b in btns) {
+          @try {
+            if (b.exists && b.label.length > 0) {
+              [out addObject:[NSString stringWithFormat:@"%@|%@", tag, b.label]];
+            }
+          } @catch (__unused NSException *ex) {}
+          if (out.count >= 50) { break; }
+        }
+      } @catch (__unused NSException *ex) {}
+    }
+  } @catch (__unused NSException *ex) {}
+  return out;
 }
 
 // [patch] Bam mot lan nut dong y (Allow) tren hop thoai xin quyen Photos.
@@ -315,8 +371,11 @@ HANDLER = r'''
   }
 
   // Xoa: performChanges bat 1 alert xac nhan -> vua doi ket qua vua tu bam Delete.
+  // Vua tap vua GHI LAI cac nut nhin thay (chan doan) de biet WDA co thay
+  // hop thoai khong.
   __block BOOL success = NO;
   __block NSError *delErr = nil;
+  NSMutableSet<NSString *> *seen = [NSMutableSet set];
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   [PHPhotoLibrary.sharedPhotoLibrary performChanges:^{
     [PHAssetChangeRequest deleteAssets:toDelete];
@@ -325,13 +384,15 @@ HANDLER = r'''
   }];
   NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
   while ([deadline timeIntervalSinceNow] > 0) {
+    [seen addObjectsFromArray:[self fb_dumpButtons]];
     [self fb_tapDeleteOnce];
     if (0 == dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) { break; }
     [NSThread sleepForTimeInterval:0.3];
   }
   return FBResponseWithObject(@{
     @"deleted": success ? @(toDelete.count) : @0,
-    @"error": delErr.localizedDescription ?: @""});
+    @"error": delErr.localizedDescription ?: @"",
+    @"seen": seen.allObjects});
 }
 '''
 
