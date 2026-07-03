@@ -88,25 +88,30 @@ HANDLER = r'''
 + (BOOL)fb_tapButtonLabels:(NSArray<NSString *> *)labels
 {
   @try {
+    // Cac hop thoai co the do: SpringBoard, CHINH app WDA Runner (nguoi goi
+    // PhotoKit -> alert xac nhan xoa do no trinh bay), hoac app dang mo.
     NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
     XCUIApplication *sys = XCUIApplication.fb_systemApplication;   // SpringBoard
     if (nil != sys) { [apps addObject:sys]; }
+    XCUIApplication *selfApp = [[XCUIApplication alloc] init];     // WDA Runner
+    if (nil != selfApp) { [apps addObject:selfApp]; }
     XCUIApplication *act = XCUIApplication.fb_activeApplication;
-    if (nil != act && act != sys) { [apps addObject:act]; }
+    if (nil != act && ![apps containsObject:act]) { [apps addObject:act]; }
+
+    // Khop nut theo NHAN (label) hoac tieu de (title) - bat ke identifier.
+    NSPredicate *pred = [NSPredicate predicateWithFormat:
+      @"label IN %@ OR title IN %@", labels, labels];
+
     for (XCUIApplication *app in apps) {
-      // 1) Nut nam trong alert
-      XCUIElement *alert = [app.alerts elementBoundByIndex:0];
-      if (alert.exists) {
-        for (NSString *name in labels) {
-          XCUIElement *b = alert.buttons[name];
-          if (b.exists && b.isHittable) { [b tap]; return YES; }
-        }
-      }
-      // 2) Nut thuong (mot so alert he thong khong nam trong alerts[])
-      for (NSString *name in labels) {
-        XCUIElement *b = app.buttons[name];
-        if (b.exists && b.isHittable) { [b tap]; return YES; }
-      }
+      // a) Nut trong ALERT (hop thoai 2 nut: Add to Photos / delete this video)
+      XCUIElement *ab = [[app.alerts.buttons matchingPredicate:pred] elementBoundByIndex:0];
+      if (ab.exists) { [ab tap]; return YES; }
+      // b) Nut trong ACTION SHEET (Allow Full Access / Keep Add Only ...)
+      XCUIElement *sb = [[app.sheets.buttons matchingPredicate:pred] elementBoundByIndex:0];
+      if (sb.exists) { [sb tap]; return YES; }
+      // c) Bat ky nut nao khop nhan (mot so alert he thong nam ngoai alerts[])
+      XCUIElement *any = [[app.buttons matchingPredicate:pred] elementBoundByIndex:0];
+      if (any.exists) { [any tap]; return YES; }
     }
   } @catch (__unused NSException *ex) {}
   return NO;
@@ -226,18 +231,26 @@ HANDLER = r'''
   ]]) {
     return YES;
   }
-  // Du phong: action-sheet "Delete X Videos" (so luong doi) -> khop theo chuoi.
+  // Du phong: nut "Delete N Videos" (so luong doi) -> khop theo CHUOI CON.
   @try {
-    NSArray<XCUIApplication *> *apps = @[
-      XCUIApplication.fb_systemApplication ?: XCUIApplication.fb_activeApplication,
-      XCUIApplication.fb_activeApplication ?: XCUIApplication.fb_systemApplication,
-    ];
+    NSMutableArray<XCUIApplication *> *apps = [NSMutableArray array];
+    XCUIApplication *sys = XCUIApplication.fb_systemApplication;
+    if (nil != sys) { [apps addObject:sys]; }
+    XCUIApplication *selfApp = [[XCUIApplication alloc] init];
+    if (nil != selfApp) { [apps addObject:selfApp]; }
+    XCUIApplication *act = XCUIApplication.fb_activeApplication;
+    if (nil != act && ![apps containsObject:act]) { [apps addObject:act]; }
     NSPredicate *p = [NSPredicate predicateWithFormat:
-      @"label CONTAINS[c] 'Delete' OR label CONTAINS[c] 'Xóa'"];
+      @"label CONTAINS[c] 'Delete' OR label CONTAINS[c] 'Xóa' "
+      @"OR title CONTAINS[c] 'Delete' OR title CONTAINS[c] 'Xóa'"];
     for (XCUIApplication *app in apps) {
-      if (nil == app) { continue; }
+      // alert -> sheet -> button
+      XCUIElement *a = [[app.alerts.buttons matchingPredicate:p] elementBoundByIndex:0];
+      if (a.exists) { [a tap]; return YES; }
+      XCUIElement *s = [[app.sheets.buttons matchingPredicate:p] elementBoundByIndex:0];
+      if (s.exists) { [s tap]; return YES; }
       XCUIElement *b = [[app.buttons matchingPredicate:p] elementBoundByIndex:0];
-      if (b.exists && b.isHittable) { [b tap]; return YES; }
+      if (b.exists) { [b tap]; return YES; }
     }
   } @catch (__unused NSException *ex) {}
   return NO;
