@@ -25,6 +25,10 @@ ROUTE_ADD = (
     'respondWithTarget:self action:@selector(handleImportVideo:)],\n'
     '    [[FBRoute POST:@"/wda/importVideo"] '
     'respondWithTarget:self action:@selector(handleImportVideo:)],\n'
+    '    [[FBRoute POST:@"/wda/deleteRecentVideos"].withoutSession '
+    'respondWithTarget:self action:@selector(handleDeleteRecentVideos:)],\n'
+    '    [[FBRoute POST:@"/wda/deleteRecentVideos"] '
+    'respondWithTarget:self action:@selector(handleDeleteRecentVideos:)],\n'
     '    [[FBRoute GET:@"/wda/vpnStatus"].withoutSession '
     'respondWithTarget:self action:@selector(handleVpnStatus:)],\n'
     '    [[FBRoute GET:@"/wda/vpnStatus"] '
@@ -187,6 +191,120 @@ HANDLER = r'''
   }
   return FBResponseWithObject(@{@"imported": @YES, @"ext": ext});
 }
+
+#pragma mark - [patch] deleteRecentVideos
+
+// [patch] Bam mot lan nut xac nhan XOA tren alert/action-sheet hien tai (neu
+// co). Dung ngu canh XCUITest cua caller. Tra YES neu vua bam duoc.
++ (BOOL)fb_tapDeleteOnce
+{
+  NSArray<NSString *> *labels = @[
+    @"Delete", @"Delete Video", @"Delete Videos", @"Delete Items", @"Delete Item",
+    @"Xóa", @"Xoá", @"Xóa video", @"Xóa Video", @"Xóa mục", @"Remove",
+    @"Allow Full Access", @"Allow Access to All Photos", @"Allow", @"OK",
+  ];
+  @try {
+    XCUIApplication *app = XCUIApplication.fb_activeApplication;
+    if (nil == app) { return NO; }
+    FBAlert *alert = [FBAlert alertWithApplication:app];
+    if (alert.isPresent) {
+      NSError *err = nil;
+      for (NSString *name in labels) {
+        err = nil;
+        if ([alert clickAlertButton:name error:&err]) { return YES; }
+      }
+    }
+    // Action sheet "Delete X Videos" khong phai alert -> bam nut theo nhan.
+    for (NSString *name in labels) {
+      XCUIElement *btn = app.buttons[name];
+      if (btn.exists && btn.isHittable) { [btn tap]; return YES; }
+    }
+    XCUIElement *sheetBtn =
+      [[app.sheets.buttons matchingPredicate:
+        [NSPredicate predicateWithFormat:@"label CONTAINS[c] 'Delete' OR label CONTAINS[c] 'Xóa'"]]
+       elementBoundByIndex:0];
+    if (sheetBtn.exists && sheetBtn.isHittable) { [sheetBtn tap]; return YES; }
+  } @catch (__unused NSException *ex) {}
+  return NO;
+}
+
+// [patch] XOA `count` video MOI NHAT (theo creationDate) khoi Thu vien anh.
+// Body JSON: {"count": 2}. Tra {"deleted": <so_video_da_xoa>}.
++ (id<FBResponsePayload>)handleDeleteRecentVideos:(FBRouteRequest *)request
+{
+  NSInteger count = 2;
+  NSNumber *cnt = request.arguments[@"count"];
+  if ([cnt isKindOfClass:NSNumber.class] && cnt.integerValue > 0) {
+    count = cnt.integerValue;
+  }
+
+  // Xoa can quyen READ-WRITE (khac importVideo chi can AddOnly).
+  PHAuthorizationStatus status;
+  if (@available(iOS 14, *)) {
+    status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
+  } else {
+    status = [PHPhotoLibrary authorizationStatus];
+  }
+  if (status == PHAuthorizationStatusNotDetermined) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block PHAuthorizationStatus answered = PHAuthorizationStatusNotDetermined;
+    void (^handler)(PHAuthorizationStatus) = ^(PHAuthorizationStatus st) {
+      answered = st; dispatch_semaphore_signal(sem);
+    };
+    if (@available(iOS 14, *)) {
+      [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:handler];
+    } else {
+      [PHPhotoLibrary requestAuthorization:handler];
+    }
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
+    while ([deadline timeIntervalSinceNow] > 0) {
+      [self fb_tapDeleteOnce];
+      if (0 == dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) { break; }
+      [NSThread sleepForTimeInterval:0.4];
+    }
+    status = answered;
+  }
+  BOOL authorized = (status == PHAuthorizationStatusAuthorized);
+  if (@available(iOS 14, *)) {
+    authorized = authorized || (status == PHAuthorizationStatusLimited);
+  }
+  if (!authorized) {
+    return FBResponseWithObject(@{@"deleted": @0,
+      @"error": [NSString stringWithFormat:@"Photos read-write not granted (status=%ld)", (long)status]});
+  }
+
+  // Lay `count` video MOI NHAT theo creationDate giam dan.
+  PHFetchOptions *opts = [PHFetchOptions new];
+  opts.predicate = [NSPredicate predicateWithFormat:@"mediaType == %d", PHAssetMediaTypeVideo];
+  opts.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
+  PHFetchResult<PHAsset *> *res = [PHAsset fetchAssetsWithOptions:opts];
+  NSMutableArray<PHAsset *> *toDelete = [NSMutableArray array];
+  for (NSInteger i = 0; i < count && i < (NSInteger)res.count; i++) {
+    [toDelete addObject:res[(NSUInteger)i]];
+  }
+  if (0 == toDelete.count) {
+    return FBResponseWithObject(@{@"deleted": @0, @"note": @"no video in library"});
+  }
+
+  // Xoa: performChanges bat 1 alert xac nhan -> vua doi ket qua vua tu bam Delete.
+  __block BOOL success = NO;
+  __block NSError *delErr = nil;
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  [PHPhotoLibrary.sharedPhotoLibrary performChanges:^{
+    [PHAssetChangeRequest deleteAssets:toDelete];
+  } completionHandler:^(BOOL ok, NSError *e) {
+    success = ok; delErr = e; dispatch_semaphore_signal(sem);
+  }];
+  NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+  while ([deadline timeIntervalSinceNow] > 0) {
+    [self fb_tapDeleteOnce];
+    if (0 == dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW)) { break; }
+    [NSThread sleepForTimeInterval:0.3];
+  }
+  return FBResponseWithObject(@{
+    @"deleted": success ? @(toDelete.count) : @0,
+    @"error": delErr.localizedDescription ?: @""});
+}
 '''
 
 
@@ -197,8 +315,13 @@ def main():
         print("[patch] LOI: khong thay", path); sys.exit(1)
     with open(path, "r", encoding="utf-8") as fp:
         src = fp.read()
+    if "handleDeleteRecentVideos" in src:
+        print("[patch] da va (co deleteRecentVideos) -> bo qua"); return
     if "handleImportVideo" in src:
-        print("[patch] da va roi -> bo qua"); return
+        # File da va ban CU (chua co deleteRecentVideos). Bao nguoi dung checkout
+        # ban WebDriverAgent SACH roi va lai de co du ca 2 route.
+        print("[patch] LOI: file da va ban cu (thieu deleteRecentVideos). "
+              "Hay checkout WebDriverAgent SACH roi chay lai patch."); sys.exit(5)
     if IMPORT_ANCHOR not in src:
         print("[patch] LOI: khong thay anchor import"); sys.exit(2)
     if ROUTE_ANCHOR not in src:
